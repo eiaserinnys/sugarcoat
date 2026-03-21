@@ -8,6 +8,9 @@ import type { Logger } from './logger.js';
 import { spawnManagedProcess } from './process-manager.js';
 import { loadEnvFiles } from './env-loader.js';
 
+const MCP_PROTOCOL_VERSION = '2024-11-05';
+const SUGARCOAT_VERSION = '1.0.0';
+
 export interface BridgeOptions {
   command: string;
   port: number;
@@ -68,6 +71,11 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   // Buffer for incomplete lines from child stdout
   let stdoutBuffer = '';
+
+  // Handle stdin write errors (e.g., child process died while writing)
+  child.stdin!.on('error', (err) => {
+    logger.debug(`stdin write error: ${err.message}`);
+  });
 
   // Forward child stderr to logger for diagnostics
   let stderrBuffer = '';
@@ -134,9 +142,9 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     id: initId,
     method: 'initialize',
     params: {
-      protocolVersion: '2024-11-05',
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'sugarcoat', version: '1.0.0' },
+      clientInfo: { name: 'sugarcoat', version: SUGARCOAT_VERSION },
     },
   }) + '\n');
 

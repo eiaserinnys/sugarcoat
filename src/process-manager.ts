@@ -107,7 +107,7 @@ export function spawnManagedProcess(options: ProcessManagerOptions): ManagedProc
   // If the caller's signal handler already called cleanup(), cleanupDone
   // prevents double-kill. This catches unexpected exits where no signal
   // handler ran.
-  process.on('exit', () => {
+  process.once('exit', () => {
     if (!cleanupDone) {
       killProcessTree(pid);
     }

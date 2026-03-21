@@ -92,6 +92,24 @@ sugarcoat solves all of these:
 - `taskkill /F /T /PID` on Windows for full tree kill
 - Built-in `.env` loading eliminates PowerShell/cmd.exe wrapper layers
 
+## Limitations
+
+- **No shell operators** — Pipe (`|`), redirection (`>`), and other shell operators in the `--stdio` command are not supported. Commands are parsed and spawned directly without a shell.
+- **Shared child process** — A single child process is shared across all HTTP sessions. For stateful MCP servers, sugarcoat initializes the child once at startup and caches the init result, so subsequent sessions receive cached capabilities without re-initializing.
+- **Windows-first** — sugarcoat was designed for Windows environments. It works on Linux/macOS as well, but the primary use case and testing target is Windows.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+This project uses [pnpm](https://pnpm.io/) as its package manager:
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+```
+
 ## License
 
 MIT
