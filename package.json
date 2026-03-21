@@ -1,0 +1,50 @@
+{
+  "name": "sugarcoat",
+  "version": "1.0.0",
+  "description": "A lightweight stdio MCP to Streamable HTTP bridge with proper process lifecycle management",
+  "type": "module",
+  "bin": {
+    "sugarcoat": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "stdio",
+    "http",
+    "bridge",
+    "streamable-http"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "cors": "^2.8.5",
+    "cross-spawn": "^7.0.6",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "shell-quote": "^1.8.2",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/express": "^5.0.0",
+    "@types/shell-quote": "^1.7.5",
+    "@types/yargs": "^17.0.33",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
