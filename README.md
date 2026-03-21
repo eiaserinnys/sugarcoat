@@ -78,19 +78,30 @@ sugarcoat (HTTP server)
 
 ## Why Not supergateway?
 
-[supergateway](https://github.com/nicobrinkkemper/supergateway) is a great tool, but it has structural issues on Windows that cause zombie processes:
+[supergateway](https://github.com/nicobrinkkemper/supergateway) offers two modes — **stateless** (new child per session) and **stateful** (shared child). Both have trade-offs that sugarcoat avoids:
 
-1. **`shell: true` spawn** — creates `cmd.exe` intermediaries that survive parent death
-2. **Missing cleanup callbacks** — `onSignals()` is called without cleanup functions
-3. **No Windows signal handling** — SIGTERM/SIGHUP are not delivered on Windows
-4. **No process tree kill** — `child.kill()` only kills the direct child, not grandchildren
+```
+                          supergateway    supergateway
+                          (stateless)     (stateful)      sugarcoat
+                          ─────────────   ─────────────   ─────────────
+Process per session       Yes (new child  No (shared)     No (shared)
+                          each time)
 
-sugarcoat solves all of these:
+Windows zombie            No              No              Yes
+prevention                                                (taskkill /F /T)
 
-- Uses `cross-spawn` with `shell: false` — no intermediary processes
-- Multi-path cleanup with `cleanupDone` guard — SIGINT, SIGTERM, SIGHUP, SIGBREAK, stdin close, exit event
-- `taskkill /F /T /PID` on Windows for full tree kill
-- Built-in `.env` loading eliminates PowerShell/cmd.exe wrapper layers
+Init caching              N/A             No              Yes
+
+ID namespacing            N/A             No              Yes
+
+.env loading              No              No              Yes (built-in)
+```
+
+**supergateway stateless** spawns a new child process per HTTP session. On Windows, these processes accumulate as zombies because `shell: true` creates `cmd.exe` intermediaries that survive parent death, and there is no process tree kill.
+
+**supergateway stateful** shares a single child process, but lacks init caching and request ID namespacing. Without init caching, each new HTTP session re-initializes the child, causing stateful MCP servers (e.g., chrome-devtools-mcp) to lose internal state. Without ID namespacing, concurrent sessions that send the same JSON-RPC id (e.g., both send `id: 1`) cause routing collisions.
+
+**sugarcoat** combines the shared-process model with init caching and ID namespacing, plus Windows-specific cleanup (`taskkill /F /T`, SIGBREAK handling, `.env` loading to avoid shell wrappers).
 
 ## Limitations
 

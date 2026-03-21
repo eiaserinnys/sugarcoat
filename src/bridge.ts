@@ -9,7 +9,7 @@ import { spawnManagedProcess } from './process-manager.js';
 import { loadEnvFiles } from './env-loader.js';
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
-const SUGARCOAT_VERSION = '1.0.0';
+const SUGARCOAT_VERSION = '0.1.0';
 
 export interface BridgeOptions {
   command: string;
@@ -306,11 +306,32 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     res.send('ok');
   });
 
-  // Child process exit — clean up pending requests and exit
+  // Child process exit — send errors to pending requests, close server, exit
   child.on('exit', (code, signal) => {
-    logger.info(`Child process exited (code: ${code}, signal: ${signal})`);
-    pendingRequests.clear();
-    process.exit(code ?? 1);
+    logger.error(`Child process died unexpectedly (code: ${code}, signal: ${signal})`);
+
+    // Send error responses to all pending requests
+    for (const [childId, pending] of pendingRequests) {
+      const errorResponse = {
+        jsonrpc: '2.0' as const,
+        id: pending.originalId,
+        error: {
+          code: -32000,
+          message: `Child process exited (code: ${code}, signal: ${signal})`,
+        },
+      };
+      pending.transport.send(errorResponse as JSONRPCMessage).catch(() => {
+        // Best-effort — transport may already be closed
+      });
+      pendingRequests.delete(childId);
+    }
+
+    // Close Express server, then exit
+    server.close(() => {
+      process.exit(code ?? 1);
+    });
+    // If server.close hangs, force exit after 3 seconds
+    setTimeout(() => process.exit(code ?? 1), 3000).unref();
   });
 
   // Start HTTP server
