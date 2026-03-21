@@ -7,6 +7,7 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { Logger } from './logger.js';
 import { spawnManagedProcess } from './process-manager.js';
 import { loadEnvFiles } from './env-loader.js';
+import { RequestRouter } from './request-router.js';
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const SUGARCOAT_VERSION = '0.1.0';
@@ -19,6 +20,29 @@ export interface BridgeOptions {
   healthEndpoint: string;
   corsEnabled: boolean;
   logger: Logger;
+}
+
+/**
+ * Classify an incoming message from a client session.
+ *
+ * - initialize requests: return cached result (if child already initialized) or forward
+ * - notifications/initialized: drop (child is already initialized)
+ * - everything else: forward to child
+ */
+export function classifyIncomingMessage(
+  msg: JSONRPCMessage,
+  childInitialized: boolean,
+): 'return-cached-init' | 'drop-initialized-notification' | 'forward-to-child' {
+  if ('method' in msg) {
+    const method = (msg as Record<string, unknown>).method as string;
+    if (method === 'initialize' && 'id' in msg) {
+      return childInitialized ? 'return-cached-init' : 'forward-to-child';
+    }
+    if (method === 'notifications/initialized') {
+      return 'drop-initialized-notification';
+    }
+  }
+  return 'forward-to-child';
 }
 
 /**
@@ -41,6 +65,7 @@ export interface BridgeOptions {
  * Routing:
  * - Requests (with id): namespaced, tracked in {childId -> (originalId, transport)}
  * - Notifications (no id): broadcast to all active sessions
+ * - Progress notifications (with progressToken): routed to requesting session only
  */
 export async function startBridge(options: BridgeOptions): Promise<void> {
   const { command, port, path, envFiles, healthEndpoint, corsEnabled, logger } = options;
@@ -56,18 +81,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     logger,
   });
 
-  // Session management
-  const transports = new Map<string, StreamableHTTPServerTransport>();
-
-  // Request-response routing with id namespacing:
-  // childId (namespaced) -> { originalId, transport }
-  const pendingRequests = new Map<string, {
-    originalId: string | number;
-    transport: StreamableHTTPServerTransport;
-  }>();
-
-  // Per-session counter for generating unique namespaced ids
-  let globalRequestCounter = 0;
+  // Request router: handles ID namespacing, response routing, notification routing
+  const router = new RequestRouter({ childStdin: child.stdin!, logger });
 
   // Buffer for incomplete lines from child stdout
   let stdoutBuffer = '';
@@ -129,7 +144,12 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
           continue;
         }
 
-        routeResponse(msg);
+        // Route responses and notifications from child
+        if ('id' in msg && msg.id !== undefined) {
+          router.routeResponse(msg);
+        } else {
+          router.routeNotification(msg);
+        }
       } catch {
         logger.debug(`Non-JSON from child stdout: ${trimmed}`);
       }
@@ -159,53 +179,6 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     };
   });
 
-  // === Response routing with id de-namespacing ===
-
-  function routeResponse(msg: JSONRPCMessage): void {
-    if ('id' in msg && msg.id !== undefined) {
-      // Look up the namespaced id to find the original id and transport
-      const childId = String(msg.id);
-      const pending = pendingRequests.get(childId);
-      if (pending) {
-        pendingRequests.delete(childId);
-        // Restore the original id before sending to client
-        const restored = { ...msg, id: pending.originalId } as JSONRPCMessage;
-        pending.transport.send(restored).catch((err) => {
-          logger.error(`Failed to send response: ${err}`);
-        });
-      } else {
-        // No pending request found — broadcast (server-initiated message)
-        broadcastToAll(msg);
-      }
-    } else {
-      // Notifications (no id) — broadcast to all active sessions
-      broadcastToAll(msg);
-    }
-  }
-
-  function broadcastToAll(msg: JSONRPCMessage): void {
-    for (const [sessionId, transport] of transports) {
-      transport.send(msg).catch((err) => {
-        logger.debug(`Failed to broadcast to session ${sessionId}: ${err}`);
-      });
-    }
-  }
-
-  function sendToChild(msg: JSONRPCMessage, transport: StreamableHTTPServerTransport): void {
-    if ('id' in msg && msg.id !== undefined && 'method' in msg) {
-      // Namespace the id to prevent collisions between sessions
-      const originalId = msg.id as string | number;
-      const childId = `sc_${++globalRequestCounter}`;
-      pendingRequests.set(childId, { originalId, transport });
-      // Replace id and forward to child
-      const namespacedMsg = { ...msg, id: childId };
-      child.stdin!.write(JSON.stringify(namespacedMsg) + '\n');
-    } else {
-      // Notifications (no id) — forward as-is
-      child.stdin!.write(JSON.stringify(msg) + '\n');
-    }
-  }
-
   // Express app setup
   const app = express();
   app.use(express.json());
@@ -218,8 +191,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let transport: StreamableHTTPServerTransport;
 
-    if (sessionId && transports.has(sessionId)) {
-      transport = transports.get(sessionId)!;
+    if (sessionId && router.hasSession(sessionId)) {
+      transport = router.getSession(sessionId)! as StreamableHTTPServerTransport;
     } else if (isInitializeRequest(req.body)) {
       // New session
       const newSessionId = randomUUID();
@@ -228,15 +201,15 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => newSessionId,
         onsessioninitialized: (id) => {
-          transports.set(id, transport);
+          router.addSession(id, transport);
           logger.debug(`Session initialized: ${id}`);
         },
       });
 
       transport.onmessage = (msg) => {
-        // Intercept initialize — return cached response without forwarding to child
-        if ('method' in msg && (msg as Record<string, unknown>).method === 'initialize' && 'id' in msg) {
-          if (childInitialized) {
+        const action = classifyIncomingMessage(msg, childInitialized);
+        switch (action) {
+          case 'return-cached-init': {
             const response = {
               jsonrpc: '2.0' as const,
               id: (msg as Record<string, unknown>).id,
@@ -245,29 +218,20 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
             transport.send(response as JSONRPCMessage).catch((err) => {
               logger.error(`Failed to send cached init response: ${err}`);
             });
+            break;
           }
-          return;
+          case 'drop-initialized-notification':
+            // Silently drop — child is already initialized
+            break;
+          case 'forward-to-child':
+            router.sendToChild(msg, transport);
+            break;
         }
-
-        // Intercept initialized notification — child already initialized
-        if ('method' in msg && (msg as Record<string, unknown>).method === 'notifications/initialized') {
-          return;
-        }
-
-        // Everything else: forward to child with namespaced id
-        sendToChild(msg, transport);
       };
 
       transport.onclose = () => {
-        const id = newSessionId;
-        transports.delete(id);
-        // Clean up any pending requests for this transport
-        for (const [reqId, pending] of pendingRequests) {
-          if (pending.transport === transport) {
-            pendingRequests.delete(reqId);
-          }
-        }
-        logger.debug(`Session closed: ${id}`);
+        router.removeSession(newSessionId);
+        logger.debug(`Session closed: ${newSessionId}`);
       };
     } else {
       res.status(400).json({ error: 'Bad request: no valid session or initialize request' });
@@ -280,24 +244,24 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // GET /mcp — Server → Client notifications (SSE stream)
   app.get(path, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    if (!sessionId || !transports.has(sessionId)) {
+    if (!sessionId || !router.hasSession(sessionId)) {
       res.status(400).json({ error: 'Invalid or missing session ID' });
       return;
     }
 
-    const transport = transports.get(sessionId)!;
+    const transport = router.getSession(sessionId)! as StreamableHTTPServerTransport;
     await transport.handleRequest(req, res);
   });
 
   // DELETE /mcp — Session termination
   app.delete(path, async (req, res) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
-    if (!sessionId || !transports.has(sessionId)) {
+    if (!sessionId || !router.hasSession(sessionId)) {
       res.status(400).json({ error: 'Invalid or missing session ID' });
       return;
     }
 
-    const transport = transports.get(sessionId)!;
+    const transport = router.getSession(sessionId)! as StreamableHTTPServerTransport;
     await transport.handleRequest(req, res);
   });
 
@@ -309,22 +273,7 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // Child process exit — send errors to pending requests, close server, exit
   child.on('exit', (code, signal) => {
     logger.error(`Child process died unexpectedly (code: ${code}, signal: ${signal})`);
-
-    // Send error responses to all pending requests
-    for (const [childId, pending] of pendingRequests) {
-      const errorResponse = {
-        jsonrpc: '2.0' as const,
-        id: pending.originalId,
-        error: {
-          code: -32000,
-          message: `Child process exited (code: ${code}, signal: ${signal})`,
-        },
-      };
-      pending.transport.send(errorResponse as JSONRPCMessage).catch(() => {
-        // Best-effort — transport may already be closed
-      });
-      pendingRequests.delete(childId);
-    }
+    router.drainPending();
 
     // Close Express server, then exit
     server.close(() => {
