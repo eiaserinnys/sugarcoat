@@ -1,5 +1,8 @@
 # sugarcoat
 
+[![npm version](https://img.shields.io/npm/v/@eiaserinnys/sugarcoat.svg)](https://www.npmjs.com/package/@eiaserinnys/sugarcoat)
+[![license](https://img.shields.io/npm/l/@eiaserinnys/sugarcoat.svg)](https://github.com/eiaserinnys/sugarcoat/blob/main/LICENSE)
+
 A lightweight bridge that wraps stdio-based [MCP (Model Context Protocol)](https://modelcontextprotocol.io) servers and exposes them as [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) endpoints.
 
 Built to solve the zombie process problems that plague tools like supergateway on Windows.
@@ -17,7 +20,7 @@ Built to solve the zombie process problems that plague tools like supergateway o
 
 ```bash
 # Run directly with npx (no install needed)
-npx @eiaserinnys/sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
+npx @eiaserinnys/sugarcoat --stdio "npx -y @anthropic/some-mcp-server" --port 3000
 ```
 
 ## Installation
@@ -37,13 +40,13 @@ pnpm build
 
 ```bash
 # Basic usage (npx)
-npx @eiaserinnys/sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
+npx @eiaserinnys/sugarcoat --stdio "npx -y @anthropic/some-mcp-server" --port 3000
 
 # Basic usage (global install)
-sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
+sugarcoat --stdio "npx -y @anthropic/some-mcp-server" --port 3000
 
 # With .env file for child process
-sugarcoat --stdio "npx -y slack-mcp-server@latest" --port 3101 --env-file ./services/mcp-slack/.env
+sugarcoat --stdio "npx -y @anthropic/some-mcp-server" --port 3000 --env-file ./.env
 
 # Multiple .env files
 sugarcoat --stdio "your-server" --port 8000 --env-file .env.common --env-file .env.local
