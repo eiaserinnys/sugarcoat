@@ -113,10 +113,8 @@ export function spawnManagedProcess(options: ProcessManagerOptions): ManagedProc
     }
   });
 
-  // Log child stderr
-  child.stderr?.on('data', (data: Buffer) => {
-    logger.debug(`[child stderr] ${data.toString().trimEnd()}`);
-  });
+  // Note: child stderr logging is handled by bridge.ts with line-buffered parsing.
+  // Do not register a duplicate stderr listener here.
 
   return { child, cleanup };
 }

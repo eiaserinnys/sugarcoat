@@ -24,8 +24,19 @@ export interface BridgeOptions {
  * Architecture: Single child process per sugarcoat instance.
  * All HTTP sessions share the same child process's stdin/stdout.
  *
+ * Initialization:
+ *   The child is initialized ONCE at startup. Subsequent HTTP sessions
+ *   receive cached capabilities without re-initializing the child.
+ *   This prevents stateful MCP servers (e.g., chrome-devtools-mcp)
+ *   from losing internal state due to repeated initialization.
+ *
+ * Request ID namespacing:
+ *   Multiple HTTP sessions may use the same JSON-RPC id (e.g., both send id=1).
+ *   To prevent routing collisions, sugarcoat prepends a session-unique prefix
+ *   when forwarding to the child, and strips it when routing responses back.
+ *
  * Routing:
- * - Requests (with id): tracked in a {id -> transport} map for response routing
+ * - Requests (with id): namespaced, tracked in {childId -> (originalId, transport)}
  * - Notifications (no id): broadcast to all active sessions
  */
 export async function startBridge(options: BridgeOptions): Promise<void> {
@@ -45,11 +56,41 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   // Session management
   const transports = new Map<string, StreamableHTTPServerTransport>();
 
-  // Request-response routing: {jsonrpc id -> transport}
-  const pendingRequests = new Map<string | number, StreamableHTTPServerTransport>();
+  // Request-response routing with id namespacing:
+  // childId (namespaced) -> { originalId, transport }
+  const pendingRequests = new Map<string, {
+    originalId: string | number;
+    transport: StreamableHTTPServerTransport;
+  }>();
+
+  // Per-session counter for generating unique namespaced ids
+  let globalRequestCounter = 0;
 
   // Buffer for incomplete lines from child stdout
   let stdoutBuffer = '';
+
+  // Forward child stderr to logger for diagnostics
+  let stderrBuffer = '';
+  child.stderr!.on('data', (data: Buffer) => {
+    stderrBuffer += data.toString();
+    const lines = stderrBuffer.split('\n');
+    stderrBuffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed) {
+        logger.info(`[child stderr] ${trimmed}`);
+      }
+    }
+  });
+
+  // === Child initialization ===
+  // Initialize the child process ONCE at startup and cache the result.
+  // HTTP sessions receive cached capabilities without re-initializing.
+
+  let cachedInitResult: unknown = null;
+  let childInitialized = false;
+  let initResolve: (() => void) | null = null;
+  const initId = `__sugarcoat_init_${Date.now()}`;
 
   // Listen to child stdout for JSON-RPC responses
   // stdin/stdout are guaranteed to exist since we spawned with stdio: ['pipe', 'pipe', 'pipe']
@@ -65,6 +106,21 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
       try {
         const msg = JSON.parse(trimmed) as JSONRPCMessage;
+
+        // During startup initialization, intercept the init response
+        if (!childInitialized && 'id' in msg && msg.id === initId) {
+          cachedInitResult = (msg as Record<string, unknown>).result;
+          childInitialized = true;
+          logger.info('Child process initialized');
+          // Complete handshake: send initialized notification
+          child.stdin!.write(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'notifications/initialized',
+          }) + '\n');
+          initResolve?.();
+          continue;
+        }
+
         routeResponse(msg);
       } catch {
         logger.debug(`Non-JSON from child stdout: ${trimmed}`);
@@ -72,17 +128,45 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     }
   });
 
+  // Send initialize request to child
+  child.stdin!.write(JSON.stringify({
+    jsonrpc: '2.0',
+    id: initId,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05',
+      capabilities: {},
+      clientInfo: { name: 'sugarcoat', version: '1.0.0' },
+    },
+  }) + '\n');
+
+  // Wait for child to respond
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Child initialization timed out (30s)'));
+    }, 30000);
+    initResolve = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+  });
+
+  // === Response routing with id de-namespacing ===
+
   function routeResponse(msg: JSONRPCMessage): void {
-    // Response messages have an 'id' field matching the request
     if ('id' in msg && msg.id !== undefined) {
-      const transport = pendingRequests.get(msg.id);
-      if (transport) {
-        pendingRequests.delete(msg.id);
-        transport.send(msg).catch((err) => {
+      // Look up the namespaced id to find the original id and transport
+      const childId = String(msg.id);
+      const pending = pendingRequests.get(childId);
+      if (pending) {
+        pendingRequests.delete(childId);
+        // Restore the original id before sending to client
+        const restored = { ...msg, id: pending.originalId } as JSONRPCMessage;
+        pending.transport.send(restored).catch((err) => {
           logger.error(`Failed to send response: ${err}`);
         });
       } else {
-        // If no pending request found, broadcast (might be a server-initiated response)
+        // No pending request found — broadcast (server-initiated message)
         broadcastToAll(msg);
       }
     } else {
@@ -100,12 +184,18 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
   }
 
   function sendToChild(msg: JSONRPCMessage, transport: StreamableHTTPServerTransport): void {
-    // Track request for response routing
     if ('id' in msg && msg.id !== undefined && 'method' in msg) {
-      pendingRequests.set(msg.id, transport);
+      // Namespace the id to prevent collisions between sessions
+      const originalId = msg.id as string | number;
+      const childId = `sc_${++globalRequestCounter}`;
+      pendingRequests.set(childId, { originalId, transport });
+      // Replace id and forward to child
+      const namespacedMsg = { ...msg, id: childId };
+      child.stdin!.write(JSON.stringify(namespacedMsg) + '\n');
+    } else {
+      // Notifications (no id) — forward as-is
+      child.stdin!.write(JSON.stringify(msg) + '\n');
     }
-
-    child.stdin!.write(JSON.stringify(msg) + '\n');
   }
 
   // Express app setup
@@ -136,6 +226,27 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
       });
 
       transport.onmessage = (msg) => {
+        // Intercept initialize — return cached response without forwarding to child
+        if ('method' in msg && (msg as Record<string, unknown>).method === 'initialize' && 'id' in msg) {
+          if (childInitialized) {
+            const response = {
+              jsonrpc: '2.0' as const,
+              id: (msg as Record<string, unknown>).id,
+              result: cachedInitResult,
+            };
+            transport.send(response as JSONRPCMessage).catch((err) => {
+              logger.error(`Failed to send cached init response: ${err}`);
+            });
+          }
+          return;
+        }
+
+        // Intercept initialized notification — child already initialized
+        if ('method' in msg && (msg as Record<string, unknown>).method === 'notifications/initialized') {
+          return;
+        }
+
+        // Everything else: forward to child with namespaced id
         sendToChild(msg, transport);
       };
 
@@ -143,8 +254,8 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
         const id = newSessionId;
         transports.delete(id);
         // Clean up any pending requests for this transport
-        for (const [reqId, t] of pendingRequests) {
-          if (t === transport) {
+        for (const [reqId, pending] of pendingRequests) {
+          if (pending.transport === transport) {
             pendingRequests.delete(reqId);
           }
         }
