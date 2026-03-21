@@ -13,23 +13,33 @@ Built to solve the zombie process problems that plague tools like supergateway o
 - **MCP Streamable HTTP spec compliant** — POST, GET (SSE), and DELETE endpoints per the MCP specification
 - **Single child process** — one sugarcoat instance manages one child process, shared across all HTTP sessions
 
+## Quick Start
+
+```bash
+# Run directly with npx (no install needed)
+npx @eiaserinnys/sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
+```
+
 ## Installation
 
 ```bash
-# Clone and build
+# Global install
+npm install -g @eiaserinnys/sugarcoat
+
+# Or clone and build from source
 git clone https://github.com/eiaserinnys/sugarcoat.git
 cd sugarcoat
 pnpm install
 pnpm build
-
-# Or use directly
-node dist/index.js --stdio "your-mcp-server" --port 3000
 ```
 
 ## Usage
 
 ```bash
-# Basic usage
+# Basic usage (npx)
+npx @eiaserinnys/sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
+
+# Basic usage (global install)
 sugarcoat --stdio "npx -y @delorenj/mcp-server-trello" --port 3102
 
 # With .env file for child process

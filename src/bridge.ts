@@ -10,7 +10,12 @@ import { loadEnvFiles } from './env-loader.js';
 import { RequestRouter } from './request-router.js';
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
-const SUGARCOAT_VERSION = '0.1.0';
+const SUGARCOAT_VERSION = '0.2.0';
+
+export interface BridgeHandle {
+  port: number;
+  close: () => Promise<void>;
+}
 
 export interface BridgeOptions {
   command: string;
@@ -20,6 +25,7 @@ export interface BridgeOptions {
   healthEndpoint: string;
   corsEnabled: boolean;
   logger: Logger;
+  exitOnChildCrash?: boolean;
 }
 
 /**
@@ -67,8 +73,8 @@ export function classifyIncomingMessage(
  * - Notifications (no id): broadcast to all active sessions
  * - Progress notifications (with progressToken): routed to requesting session only
  */
-export async function startBridge(options: BridgeOptions): Promise<void> {
-  const { command, port, path, envFiles, healthEndpoint, corsEnabled, logger } = options;
+export async function startBridge(options: BridgeOptions): Promise<BridgeHandle> {
+  const { command, port, path, envFiles, healthEndpoint, corsEnabled, logger, exitOnChildCrash = true } = options;
 
   // Load env files and merge with process.env for child process
   const envFromFiles = envFiles.length > 0 ? loadEnvFiles(envFiles, logger) : {};
@@ -270,23 +276,30 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
     res.send('ok');
   });
 
-  // Child process exit — send errors to pending requests, close server, exit
+  // Start HTTP server
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const s = app.listen(port, () => {
+      logger.info(`Listening on http://localhost:${port}${path}`);
+      logger.info(`Health check: http://localhost:${port}${healthEndpoint}`);
+      resolve(s);
+    });
+  });
+
+  const actualPort = (server.address() as { port: number }).port;
+
+  // Child process exit — send errors to pending requests, optionally exit process
   child.on('exit', (code, signal) => {
     logger.error(`Child process died unexpectedly (code: ${code}, signal: ${signal})`);
     router.drainPending();
 
-    // Close Express server, then exit
-    server.close(() => {
-      process.exit(code ?? 1);
-    });
-    // If server.close hangs, force exit after 3 seconds
-    setTimeout(() => process.exit(code ?? 1), 3000).unref();
-  });
-
-  // Start HTTP server
-  const server = app.listen(port, () => {
-    logger.info(`Listening on http://localhost:${port}${path}`);
-    logger.info(`Health check: http://localhost:${port}${healthEndpoint}`);
+    if (exitOnChildCrash) {
+      // Close Express server, then exit
+      server.close(() => {
+        process.exit(code ?? 1);
+      });
+      // If server.close hangs, force exit after 3 seconds
+      setTimeout(() => process.exit(code ?? 1), 3000).unref();
+    }
   });
 
   // Graceful shutdown: cleanup child → close server → exit
@@ -314,4 +327,12 @@ export async function startBridge(options: BridgeOptions): Promise<void> {
 
   // stdin close — parent process died
   process.stdin.on('close', () => gracefulShutdown('stdin-close'));
+
+  return {
+    port: actualPort,
+    close: () => new Promise<void>((resolve) => {
+      cleanup();
+      server.close(() => resolve());
+    }),
+  };
 }

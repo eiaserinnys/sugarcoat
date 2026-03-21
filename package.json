@@ -1,6 +1,6 @@
 {
-  "name": "sugarcoat",
-  "version": "0.1.0",
+  "name": "@eiaserinnys/sugarcoat",
+  "version": "0.2.0",
   "description": "A lightweight stdio MCP to Streamable HTTP bridge with proper process lifecycle management",
   "type": "module",
   "bin": {
@@ -27,6 +27,9 @@
     "bridge",
     "streamable-http"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "eiaserinnys",
   "license": "MIT",
   "repository": {
