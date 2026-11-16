@@ -26,6 +26,8 @@ export interface BridgeOptions {
   corsEnabled: boolean;
   logger: Logger;
   exitOnChildCrash?: boolean;
+  /** Milliseconds to wait for the child to answer the initialize request (default: 120000) */
+  initTimeoutMs?: number;
 }
 
 /**
@@ -74,7 +76,21 @@ export function classifyIncomingMessage(
  * - Progress notifications (with progressToken): routed to requesting session only
  */
 export async function startBridge(options: BridgeOptions): Promise<BridgeHandle> {
-  const { command, port, path, envFiles, healthEndpoint, corsEnabled, logger, exitOnChildCrash = true } = options;
+  const {
+    command,
+    port,
+    path,
+    envFiles,
+    healthEndpoint,
+    corsEnabled,
+    logger,
+    exitOnChildCrash = true,
+    initTimeoutMs = 120000,
+  } = options;
+
+  if (!Number.isFinite(initTimeoutMs) || initTimeoutMs <= 0) {
+    throw new Error(`initTimeoutMs must be a positive number of milliseconds (got: ${initTimeoutMs})`);
+  }
 
   // Load env files and merge with process.env for child process
   const envFromFiles = envFiles.length > 0 ? loadEnvFiles(envFiles, logger) : {};
@@ -174,16 +190,44 @@ export async function startBridge(options: BridgeOptions): Promise<BridgeHandle>
     },
   }) + '\n');
 
-  // Wait for child to respond
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('Child initialization timed out (30s)'));
-    }, 30000);
-    initResolve = () => {
-      clearTimeout(timeout);
-      resolve();
-    };
-  });
+  // Wait for child to respond. Fail fast if the child exits or emits an error
+  // while initialization is still pending, instead of waiting out the timeout.
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        cleanupInitWatchers();
+        reject(new Error(`Child initialization timed out (${initTimeoutMs / 1000}s)`));
+      }, initTimeoutMs);
+
+      const cleanupInitWatchers = () => {
+        clearTimeout(timeout);
+        child.off('exit', onExit);
+        child.off('error', onError);
+      };
+
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        cleanupInitWatchers();
+        reject(new Error(`Child exited during initialization (code: ${code}, signal: ${signal})`));
+      };
+
+      const onError = (err: Error) => {
+        cleanupInitWatchers();
+        reject(new Error(`Child process error during initialization: ${err.message}`));
+      };
+
+      child.once('exit', onExit);
+      child.once('error', onError);
+
+      initResolve = () => {
+        cleanupInitWatchers();
+        resolve();
+      };
+    });
+  } catch (err) {
+    // Initialization failed — tear down the child so it cannot outlive the failed start.
+    cleanup();
+    throw err;
+  }
 
   // Express app setup
   const app = express();

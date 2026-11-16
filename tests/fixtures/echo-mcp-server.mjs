@@ -15,6 +15,20 @@
 
 import { createInterface } from 'readline';
 
+// Optional knobs for initialization-timeout tests:
+//   --init-delay=<ms>   Delay the initialize response by <ms> milliseconds
+//   --exit-before-init  Exit with code 1 immediately, without responding to initialize
+const fixtureArgs = process.argv.slice(2);
+const initDelayArg = fixtureArgs.find((arg) => arg.startsWith('--init-delay='));
+const INIT_DELAY_MS = initDelayArg
+  ? Number(initDelayArg.slice('--init-delay='.length))
+  : 0;
+const EXIT_BEFORE_INIT = fixtureArgs.includes('--exit-before-init');
+
+if (EXIT_BEFORE_INIT) {
+  process.exit(1);
+}
+
 const rl = createInterface({ input: process.stdin });
 
 function send(obj) {
@@ -30,17 +44,24 @@ function handleMessage(msg) {
   }
 
   switch (method) {
-    case 'initialize':
-      send({
-        jsonrpc: '2.0',
-        id,
-        result: {
-          protocolVersion: '2024-11-05',
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'echo-mcp-server', version: '1.0.0' },
-        },
-      });
+    case 'initialize': {
+      const respond = () =>
+        send({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: { listChanged: false } },
+            serverInfo: { name: 'echo-mcp-server', version: '1.0.0' },
+          },
+        });
+      if (INIT_DELAY_MS > 0) {
+        setTimeout(respond, INIT_DELAY_MS);
+      } else {
+        respond();
+      }
       break;
+    }
 
     case 'tools/list':
       send({
