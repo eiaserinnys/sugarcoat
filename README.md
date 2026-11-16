@@ -72,6 +72,7 @@ sugarcoat --stdio "your-server" --port 8000 --log-level debug
 | `--health` | string | `/health` | Health check endpoint path |
 | `--cors` | boolean | `false` | Enable CORS |
 | `--log-level` | string | `info` | Log level: `debug`, `info`, or `none` |
+| `--init-timeout` | number | `120` | Seconds to wait for child MCP initialization before failing |
 
 ## How It Works
 

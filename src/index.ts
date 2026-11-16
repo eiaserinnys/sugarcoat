@@ -45,12 +45,24 @@ const argv = await yargs(hideBin(process.argv))
     default: 'info' as const,
     describe: 'Log level',
   })
+  .option('init-timeout', {
+    type: 'number',
+    default: 120,
+    describe: 'Seconds to wait for child MCP initialization before failing',
+  })
   .example(
     '$0 --stdio "npx -y @delorenj/mcp-server-trello" --port 3102 --env-file .env',
     'Bridge a Trello MCP server to HTTP on port 3102',
   )
   .help()
   .parseAsync();
+
+if (!Number.isFinite(argv.initTimeout) || argv.initTimeout <= 0) {
+  console.error(
+    `sugarcoat: --init-timeout must be a positive number of seconds (got: ${argv.initTimeout})`,
+  );
+  process.exit(1);
+}
 
 const logger = createLogger(argv.logLevel as LogLevel);
 
@@ -66,5 +78,6 @@ await startBridge({
   envFiles: argv.envFile,
   healthEndpoint: argv.health,
   corsEnabled: argv.cors,
+  initTimeoutMs: argv.initTimeout * 1000,
   logger,
 });
